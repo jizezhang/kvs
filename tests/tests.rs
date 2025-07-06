@@ -2,7 +2,6 @@ use assert_cmd::prelude::*;
 use kvs::{KvStore, Result};
 use predicates::ord::eq;
 use predicates::str::{PredicateStrExt, contains, is_empty};
-use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
 use walkdir::WalkDir;

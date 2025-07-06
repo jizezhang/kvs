@@ -23,9 +23,16 @@ pub struct Cmd {
     pub value: String,
 }
 
+pub struct ValueEntry {
+    pub file_id: String,
+    pub vsz: usize,
+    pub vpos: u64,
+}
+
 pub struct Wal {
     dir: PathBuf,
     current: File,
+    current_filename: String,
 }
 
 impl Wal {
@@ -38,45 +45,12 @@ impl Wal {
             Some(name) => name.to_owned(),
             None => Wal::generate_log_file_name(),
         };
-        let current = Wal::open_log_file(&log_dir.join(filename))?;
+        let current = Wal::open_log_file(&log_dir.join(&filename))?;
         Ok(Wal {
             dir: log_dir,
             current,
+            current_filename: filename,
         })
-    }
-
-    pub fn replay(&mut self, map: &mut HashMap<String, String>) -> Result<()> {
-        let files = Wal::search_log_files(&self.dir)?;
-        for file in files {
-            self.current = Wal::open_log_file(&self.dir.join(file))?;
-            self.load_log_file(map)?;
-        }
-        Ok(())
-    }
-
-    fn load_log_file(&mut self, map: &mut HashMap<String, String>) -> Result<()> {
-        let mut offset: u64 = 0;
-        loop {
-            let result = self.read(&mut offset);
-            match result {
-                Ok(cmd) => {
-                    match cmd.operation {
-                        Operation::SET => map.insert(cmd.key, cmd.value),
-                        Operation::RM => map.remove(&cmd.key),
-                    };
-                }
-                Err(err) => match &err {
-                    KvsError::IoError(error) => {
-                        if error.kind() == ErrorKind::UnexpectedEof {
-                            return Ok(());
-                        } else {
-                            return Err(err);
-                        }
-                    }
-                    _ => return Err(err),
-                },
-            }
-        }
     }
 
     pub fn search_log_files(path: &Path) -> Result<Vec<String>> {
@@ -95,17 +69,6 @@ impl Wal {
         log_id.to_string() + ".log"
     }
 
-    fn create_log_file_if_needed(&mut self) -> Result<()> {
-        if self.current.metadata()?.len() >= Wal::SEGMENT_SIZE {
-            self.current = Wal::create_log_file(&self.dir)?;
-        }
-        Ok(())
-    }
-
-    fn create_log_file(dir: &Path) -> Result<File> {
-        Wal::open_log_file(&dir.join(Wal::generate_log_file_name()))
-    }
-
     fn open_log_file(path: &Path) -> Result<File> {
         let file_handle = OpenOptions::new()
             .create(true)
@@ -115,27 +78,113 @@ impl Wal {
         Ok(file_handle)
     }
 
-    pub fn write(&mut self, cmd: &Cmd) -> Result<u64> {
-        let value = serde_json::to_string(cmd)?;
-        let buf = value.as_bytes();
-        let len_buf = buf.len().to_ne_bytes();
-
-        self.create_log_file_if_needed()?;
-        let start = self.current.metadata()?.len();
-        self.current.write_all(&len_buf)?;
-        self.current.write_all(buf)?;
-        Ok(start)
+    pub fn replay(&mut self, map: &mut HashMap<String, ValueEntry>) -> Result<()> {
+        let files = Wal::search_log_files(&self.dir)?;
+        for file in files {
+            self.current = Wal::open_log_file(&self.dir.join(&file))?;
+            self.load_log_file(file, map)?;
+        }
+        Ok(())
     }
 
-    pub fn read(&mut self, offset: &mut u64) -> Result<Cmd> {
+    fn load_log_file(
+        &mut self,
+        file_id: String,
+        map: &mut HashMap<String, ValueEntry>,
+    ) -> Result<()> {
+        let mut offset: u64 = 0;
+        loop {
+            let result = self.read(&mut offset);
+            match result {
+                Ok((key, size)) => {
+                    if size == 0 {
+                        map.remove(&key);
+                    } else {
+                        map.insert(
+                            key,
+                            ValueEntry {
+                                file_id: file_id.clone(),
+                                vsz: size,
+                                vpos: offset,
+                            },
+                        );
+                        offset += size as u64; // skip reading value
+                    }
+                }
+                Err(err) => match &err {
+                    KvsError::IoError(error) => {
+                        if error.kind() == ErrorKind::UnexpectedEof {
+                            return Ok(());
+                        } else {
+                            return Err(err);
+                        }
+                    }
+                    _ => return Err(err),
+                },
+            }
+        }
+    }
+
+    fn create_log_file_if_needed(&mut self) -> Result<()> {
+        if self.current.metadata()?.len() >= Wal::SEGMENT_SIZE {
+            self.current = Wal::open_log_file(&self.dir.join(Wal::generate_log_file_name()))?;
+        }
+        Ok(())
+    }
+
+    pub fn write(&mut self, cmd: Cmd) -> Result<ValueEntry> {
+        self.create_log_file_if_needed()?;
+
+        let key = cmd.key;
+        let ksz = key.len();
+        let val = cmd.value;
+        let vsz = match cmd.operation {
+            Operation::SET => val.len(),
+            Operation::RM => 0,
+        };
+
+        let ksz_buf = ksz.to_ne_bytes();
+        self.current.write_all(&ksz_buf)?;
+        let vsz_buf = vsz.to_ne_bytes();
+        self.current.write_all(&vsz_buf)?;
+
+        let key_buf = key.as_bytes();
+        self.current.write_all(key_buf)?;
+        let vpos = self.current.metadata()?.len();
+        if vsz > 0 {
+            let val_buf = val.as_bytes();
+            self.current.write_all(val_buf)?;
+        }
+        Ok(ValueEntry {
+            file_id: self.current_filename.clone(),
+            vsz,
+            vpos,
+        })
+    }
+
+    fn read(&mut self, offset: &mut u64) -> Result<(String, usize)> {
+        let ksz = self.read_size(offset)?;
+        let vsz = self.read_size(offset)?;
+
+        let mut key_buf = vec![0u8; ksz];
+        self.current.read_exact_at(&mut key_buf, *offset)?;
+        *offset += ksz as u64;
+        let key = String::from_utf8(key_buf)?;
+        Ok((key, vsz))
+    }
+
+    fn read_size(&mut self, offset: &mut u64) -> Result<usize> {
         let mut buf = [0u8; std::mem::size_of::<usize>()];
         self.current.read_exact_at(&mut buf, *offset)?;
         let size = usize::from_ne_bytes(buf);
-        let mut buf = vec![0u8; size];
-        *offset += 8;
-        self.current.read_exact_at(&mut buf, *offset)?;
-        let cmd: Cmd = serde_json::from_slice(&buf)?;
-        *offset += size as u64;
-        Ok(cmd)
+        *offset += std::mem::size_of::<usize>() as u64;
+        Ok(size)
+    }
+
+    pub fn read_value(&mut self, ve: &ValueEntry) -> Result<String> {
+        let mut buf = vec![0u8; ve.vsz];
+        let file = Wal::open_log_file(&self.dir.join(&ve.file_id))?;
+        file.read_exact_at(&mut buf, ve.vpos)?;
+        Ok(String::from_utf8(buf)?)
     }
 }

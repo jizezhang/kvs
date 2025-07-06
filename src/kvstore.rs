@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::error::{KvsError, Result};
-use crate::log::{Cmd, Operation, Wal};
+use crate::log::{Cmd, Operation, ValueEntry, Wal};
 
 pub struct KvStore {
-    map: HashMap<String, String>,
+    map: HashMap<String, ValueEntry>,
     log: Wal,
 }
 
@@ -20,7 +20,16 @@ impl KvStore {
     }
 
     pub fn get(&mut self, key: String) -> Result<Option<String>> {
-        Ok(self.map.get(&key).cloned())
+        match self.map.get(&key) {
+            Some(ve) => {
+                if ve.vsz > 0 {
+                    Ok(Some(self.log.read_value(ve)?))
+                } else {
+                    Ok(None)
+                }
+            }
+            None => Ok(None),
+        }
     }
 
     pub fn set(&mut self, key: String, value: String) -> Result<()> {
@@ -29,8 +38,8 @@ impl KvStore {
             key: key.clone(),
             value: value.clone(),
         };
-        self.log.write(&cmd)?;
-        self.map.insert(key, value);
+        let ve = self.log.write(cmd)?;
+        self.map.insert(key, ve);
         Ok(())
     }
 
@@ -41,7 +50,7 @@ impl KvStore {
                 key,
                 value: String::from(""),
             };
-            self.log.write(&cmd)?;
+            self.log.write(cmd)?;
             Ok(())
         } else {
             Err(KvsError::KeyNotFound(key))

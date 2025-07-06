@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, string::FromUtf8Error};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -7,7 +7,7 @@ pub enum KvsError {
     IoError(#[from] io::Error),
 
     #[error("SerDe error: {0}")]
-    SerializationError(#[from] serde_json::Error),
+    SerializationError(#[from] FromUtf8Error),
 
     #[error("End of file")]
     EofError,
