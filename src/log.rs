@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    fs::{File, OpenOptions, create_dir_all, read_dir},
+    fs::{File, OpenOptions, create_dir_all, read_dir, remove_file},
     io::{ErrorKind, Write},
     os::unix::fs::FileExt,
     path::{Path, PathBuf},
@@ -36,7 +36,7 @@ pub struct Wal {
 }
 
 impl Wal {
-    const SEGMENT_SIZE: u64 = 1024;
+    const SEGMENT_SIZE: u64 = 128;
 
     pub fn open(path: &Path) -> Result<Wal> {
         let log_dir = path.join(".log");
@@ -87,6 +87,25 @@ impl Wal {
         Ok(())
     }
 
+    pub fn compact(&mut self, map: &mut HashMap<String, ValueEntry>) -> Result<()> {
+        let files = Wal::search_log_files(&self.dir)?;
+        self.current_filename = Wal::generate_log_file_name();
+        self.current = Wal::open_log_file(&self.dir.join(&self.current_filename))?;
+        for (k, ve) in map {
+            let cmd = Cmd {
+                operation: Operation::SET,
+                key: k.to_owned(),
+                value: self.read_value(ve)?,
+            };
+            let nve = self.write(cmd)?;
+            *ve = nve;
+        }
+        for file in files {
+            remove_file(self.dir.join(file))?;
+        }
+        Ok(())
+    }
+
     fn load_log_file(
         &mut self,
         file_id: String,
@@ -127,7 +146,8 @@ impl Wal {
 
     fn create_log_file_if_needed(&mut self) -> Result<()> {
         if self.current.metadata()?.len() >= Wal::SEGMENT_SIZE {
-            self.current = Wal::open_log_file(&self.dir.join(Wal::generate_log_file_name()))?;
+            self.current_filename = Wal::generate_log_file_name();
+            self.current = Wal::open_log_file(&self.dir.join(&self.current_filename))?;
         }
         Ok(())
     }
