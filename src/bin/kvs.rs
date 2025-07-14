@@ -28,16 +28,16 @@ fn main() -> Result<()> {
     let mut kvstore = KvStore::open(&path)?;
     let cli = Cli::parse();
 
-    match &cli.command {
+    match cli.command {
         Commands::Get { key } => {
-            match kvstore.get(key.to_owned())? {
+            match kvstore.get(key)? {
                 Some(value) => println!("{}", value),
                 None => println!("Key not found"),
             };
             Ok(())
         }
-        Commands::Set { key, value } => kvstore.set(key.to_owned(), value.to_owned()),
-        Commands::Remove { key } => match kvstore.remove(key.to_owned()) {
+        Commands::Set { key, value } => kvstore.set(key, value),
+        Commands::Remove { key } => match kvstore.remove(key) {
             Err(err) => {
                 println!("Key not found");
                 Err(err)
